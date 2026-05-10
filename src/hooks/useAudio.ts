@@ -40,11 +40,11 @@ function float32ToWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   return buf;
 }
 
-function toDataUri(wav: ArrayBuffer): string {
-  const bytes = new Uint8Array(wav);
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
   let binary = '';
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return `data:audio/wav;base64,${btoa(binary)}`;
+  return btoa(binary);
 }
 
 const CHIME_HARMONICS = [
@@ -83,6 +83,12 @@ function buildSilentKeepAlive(): Float32Array {
   return buf;
 }
 
+async function playSoundFromWav(wavBuffer: ArrayBuffer): Promise<Audio.Sound> {
+  const uri = `data:audio/wav;base64,${arrayBufferToBase64(wavBuffer)}`;
+  const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: true, volume: 1.0 });
+  return sound;
+}
+
 const AUDIO_MODE = {
   allowsRecordingIOS: false,
   staysActiveInBackground: true,
@@ -91,28 +97,27 @@ const AUDIO_MODE = {
   shouldDuckAndroid: false,
   interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
   playThroughEarpieceAndroid: false,
-} as const;
+};
 
 export function useAudio() {
-  // Pre-encoded URI strings — built lazily on first use, then cached.
-  // Keeping them separate means one failing can't block the others.
-  const chimeUriRef    = useRef<string | null>(null);
-  const endBellUriRef  = useRef<string | null>(null);
-  const silentUriRef   = useRef<string | null>(null);
+  const chimeWavRef    = useRef<ArrayBuffer | null>(null);
+  const endBellWavRef  = useRef<ArrayBuffer | null>(null);
+  const silentWavRef   = useRef<ArrayBuffer | null>(null);
   const silentSoundRef = useRef<Audio.Sound | null>(null);
+  const initRef        = useRef(false);
 
-  // Promise for the audio mode call only — fast, no heavy CPU work.
-  const modePromiseRef = useRef<Promise<void> | null>(null);
-
-  // ─── Eager audio mode init at mount ──────────────────────────────────────
+  // ─── Eager audio session setup at mount ───────────────────────────────────
+  // Sets the AVAudioSession category to Playback with background capability
+  // before the user taps Begin, so iOS grants background execution time.
+  // Also re-applies mode when returning from background (calls / Siri reset
+  // AVAudioSession and we must re-activate it).
   useEffect(() => {
-    modePromiseRef.current = Audio.setAudioModeAsync(AUDIO_MODE);
+    Audio.setAudioModeAsync(AUDIO_MODE).catch(() => {});
 
-    // Re-apply mode on foreground return; iOS resets AVAudioSession after
-    // interruptions (calls, Siri). Also restart the silent loop if it stopped.
     const sub = AppState.addEventListener('change', async (state) => {
       if (state === 'active') {
         await Audio.setAudioModeAsync(AUDIO_MODE).catch(() => {});
+        // Restart the silent keep-alive loop if it was stopped by an interruption
         const sound = silentSoundRef.current;
         if (sound) {
           try {
@@ -128,67 +133,63 @@ export function useAudio() {
     return () => sub.remove();
   }, []);
 
-  // Waits for audio mode to be ready; starts the call if it hasn't begun yet.
-  const ensureMode = useCallback(async () => {
-    if (!modePromiseRef.current) {
-      modePromiseRef.current = Audio.setAudioModeAsync(AUDIO_MODE);
-    }
-    await modePromiseRef.current;
+  // ─── Lazy init: builds PCM buffers on first use ───────────────────────────
+  // Guarded by a boolean so concurrent callers don't double-init.
+  // The second caller returns immediately (initRef already true) so it may
+  // see null buffers — that is fine because init completes in ~20 ms and the
+  // earliest interval is 10 s.
+  const init = useCallback(async () => {
+    if (initRef.current) return;
+    initRef.current = true;
+
+    await Audio.setAudioModeAsync(AUDIO_MODE);
+
+    chimeWavRef.current   = float32ToWav(buildSineWave(CHIME_HARMONICS, 3.5), SAMPLE_RATE);
+    endBellWavRef.current = float32ToWav(buildEndBell(), SAMPLE_RATE);
+    silentWavRef.current  = float32ToWav(buildSilentKeepAlive(), SAMPLE_RATE);
   }, []);
 
-  // ─── Playback helpers — buffers built lazily, errors are isolated ─────────
   const playChime = useCallback(async () => {
-    await ensureMode();
+    await init();
+    if (!chimeWavRef.current) return;
     try {
-      if (!chimeUriRef.current) {
-        chimeUriRef.current = toDataUri(float32ToWav(buildSineWave(CHIME_HARMONICS, 3.5), SAMPLE_RATE));
-      }
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: chimeUriRef.current },
-        { shouldPlay: true, volume: 1.0 }
-      );
+      const sound = await playSoundFromWav(chimeWavRef.current);
       sound.setOnPlaybackStatusUpdate((s) => {
         if ('didJustFinish' in s && s.didJustFinish) sound.unloadAsync();
       });
     } catch (e) {
       console.warn('playChime error', e);
     }
-  }, [ensureMode]);
+  }, [init]);
 
   const playEndBell = useCallback(async () => {
-    await ensureMode();
+    await init();
+    if (!endBellWavRef.current) return;
     try {
-      if (!endBellUriRef.current) {
-        endBellUriRef.current = toDataUri(float32ToWav(buildEndBell(), SAMPLE_RATE));
-      }
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: endBellUriRef.current },
-        { shouldPlay: true, volume: 1.0 }
-      );
+      const sound = await playSoundFromWav(endBellWavRef.current);
       sound.setOnPlaybackStatusUpdate((s) => {
         if ('didJustFinish' in s && s.didJustFinish) sound.unloadAsync();
       });
     } catch (e) {
       console.warn('playEndBell error', e);
     }
-  }, [ensureMode]);
+  }, [init]);
 
   const startSilentLoop = useCallback(async () => {
-    await ensureMode();
+    await init();
     if (silentSoundRef.current) return;
+    if (!silentWavRef.current) return;
     try {
-      if (!silentUriRef.current) {
-        silentUriRef.current = toDataUri(float32ToWav(buildSilentKeepAlive(), SAMPLE_RATE));
-      }
+      const uri = `data:audio/wav;base64,${arrayBufferToBase64(silentWavRef.current)}`;
       const { sound } = await Audio.Sound.createAsync(
-        { uri: silentUriRef.current },
+        { uri },
         { shouldPlay: true, volume: 1.0, isLooping: true }
       );
       silentSoundRef.current = sound;
     } catch (e) {
       console.warn('startSilentLoop error', e);
     }
-  }, [ensureMode]);
+  }, [init]);
 
   const stopSilentLoop = useCallback(async () => {
     const sound = silentSoundRef.current;
