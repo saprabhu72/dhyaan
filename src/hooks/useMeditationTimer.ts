@@ -1,14 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAudio } from './useAudio';
+import { Stage } from '../types';
 
-export type TimerPhase = 'idle' | 'running' | 'paused' | 'complete';
+export type TimerPhase = 'idle' | 'running' | 'paused' | 'transitioning' | 'complete';
 
 export interface TimerState {
   phase: TimerPhase;
-  currentInterval: number;    // 1-based index of current interval
-  intervalProgress: number;   // 0..1, how far into the current interval
+  currentStageIndex: number;
+  totalStages: number;
+  currentChime: number;          // 1-based within current stage
+  totalChimesInStage: number;
+  intervalProgress: number;      // 0..1
   secondsToNextChime: number;
-  totalChimes: number;
+  completedStageIndex: number | null; // set during 'transitioning'
 }
 
 export interface TimerControls {
@@ -18,31 +22,46 @@ export interface TimerControls {
   reset: () => void;
 }
 
-export function useMeditationTimer(
-  intervalMinutes: number,
-  chimeCount: number
-): [TimerState, TimerControls] {
-  const { playChime, playEndBell } = useAudio();
+function stageIntervalSec(stage: Stage): number {
+  return stage.unit === 'minutes' ? stage.interval * 60 : stage.interval;
+}
+
+function stageIntervalMs(stage: Stage): number {
+  return stageIntervalSec(stage) * 1000;
+}
+
+export function useMeditationTimer(stages: Stage[]): [TimerState, TimerControls] {
+  const { playChime, playEndBell, startSilentLoop, stopSilentLoop } = useAudio();
+
+  const firstStageSec = stages[0] ? stageIntervalSec(stages[0]) : 300;
 
   const [phase, setPhase] = useState<TimerPhase>('idle');
-  const [currentInterval, setCurrentInterval] = useState(1);
+  const [currentStageIndex, setCurrentStageIndex] = useState(0);
+  const [currentChime, setCurrentChime] = useState(1);
   const [intervalProgress, setIntervalProgress] = useState(0);
-  const [secondsToNextChime, setSecondsToNextChime] = useState(intervalMinutes * 60);
+  const [secondsToNextChime, setSecondsToNextChime] = useState(firstStageSec);
+  const [completedStageIndex, setCompletedStageIndex] = useState<number | null>(null);
 
-  // Internal refs for accurate timing
   const rafRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const startTimeRef = useRef<number>(0);       // when current interval began
-  const pausedElapsedRef = useRef<number>(0);   // ms elapsed in current interval before pause
-  const currentIntervalRef = useRef(1);
+  const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const pausedElapsedRef = useRef<number>(0);
+  const currentStageIndexRef = useRef(0);
+  const currentChimeRef = useRef(1);
   const phaseRef = useRef<TimerPhase>('idle');
-  const intervalMsRef = useRef(intervalMinutes * 60 * 1000);
-  const chimeCountRef = useRef(chimeCount);
+  const stagesRef = useRef(stages);
 
-  // Keep refs in sync with props
   useEffect(() => {
-    intervalMsRef.current = intervalMinutes * 60 * 1000;
-    chimeCountRef.current = chimeCount;
-  }, [intervalMinutes, chimeCount]);
+    stagesRef.current = stages;
+  }, [stages]);
+
+  // Keep countdown display in sync when stages change while idle
+  useEffect(() => {
+    if (phase === 'idle') {
+      const first = stages[0];
+      setSecondsToNextChime(first ? stageIntervalSec(first) : 300);
+    }
+  }, [stages, phase]);
 
   const stopTick = useCallback(() => {
     if (rafRef.current !== null) {
@@ -51,59 +70,98 @@ export function useMeditationTimer(
     }
   }, []);
 
+  const startStage = useCallback((stageIndex: number) => {
+    const stage = stagesRef.current[stageIndex];
+    currentStageIndexRef.current = stageIndex;
+    currentChimeRef.current = 1;
+    setCurrentStageIndex(stageIndex);
+    setCurrentChime(1);
+    pausedElapsedRef.current = 0;
+    startTimeRef.current = Date.now();
+    setIntervalProgress(0);
+    setSecondsToNextChime(stageIntervalSec(stage));
+  }, []);
+
   const tick = useCallback(() => {
     if (phaseRef.current !== 'running') return;
 
+    const stageIndex = currentStageIndexRef.current;
+    const chimeIndex = currentChimeRef.current;
+    const stage = stagesRef.current[stageIndex];
+    const intervalMs = stageIntervalMs(stage);
     const elapsed = Date.now() - startTimeRef.current + pausedElapsedRef.current;
-    const intervalMs = intervalMsRef.current;
     const progress = Math.min(elapsed / intervalMs, 1);
     const remaining = Math.max(0, intervalMs - elapsed);
 
     setIntervalProgress(progress);
     setSecondsToNextChime(Math.ceil(remaining / 1000));
 
-    if (elapsed >= intervalMs) {
-      // Interval complete
-      const nextInterval = currentIntervalRef.current + 1;
+    if (elapsed < intervalMs) {
+      rafRef.current = setTimeout(tick, 250);
+      return;
+    }
 
-      if (nextInterval > chimeCountRef.current) {
-        // Session complete
-        phaseRef.current = 'complete';
-        setPhase('complete');
-        setIntervalProgress(1);
-        setSecondsToNextChime(0);
-        playEndBell();
-        return;
-      }
-
-      // Advance to next interval
-      currentIntervalRef.current = nextInterval;
-      setCurrentInterval(nextInterval);
+    // Advance chime within stage
+    const nextChime = chimeIndex + 1;
+    if (nextChime <= stage.chimes) {
+      currentChimeRef.current = nextChime;
+      setCurrentChime(nextChime);
       pausedElapsedRef.current = 0;
       startTimeRef.current = Date.now();
       setIntervalProgress(0);
-      setSecondsToNextChime(Math.ceil(intervalMsRef.current / 1000));
-
-      // Play chime between intervals (not at start, not at the final end)
+      setSecondsToNextChime(stageIntervalSec(stage));
       playChime();
+      rafRef.current = setTimeout(tick, 250);
+      return;
     }
 
-    rafRef.current = setTimeout(tick, 250);
-  }, [playChime, playEndBell]);
+    // All chimes in this stage complete
+    const nextStageIndex = stageIndex + 1;
+    if (nextStageIndex >= stagesRef.current.length) {
+      phaseRef.current = 'complete';
+      setPhase('complete');
+      setIntervalProgress(1);
+      setSecondsToNextChime(0);
+      setCompletedStageIndex(null);
+      playEndBell();
+      stopSilentLoop();
+      return;
+    }
+
+    // Transition to next stage
+    phaseRef.current = 'transitioning';
+    setPhase('transitioning');
+    setIntervalProgress(1);
+    setCompletedStageIndex(stageIndex);
+    playChime();
+
+    transitionTimerRef.current = setTimeout(() => {
+      if (phaseRef.current !== 'transitioning') return;
+      phaseRef.current = 'running';
+      setPhase('running');
+      setCompletedStageIndex(null);
+      startStage(nextStageIndex);
+      rafRef.current = setTimeout(tick, 250);
+    }, 2000);
+  }, [playChime, playEndBell, startStage, stopSilentLoop]);
 
   const begin = useCallback(() => {
-    currentIntervalRef.current = 1;
-    setCurrentInterval(1);
+    currentStageIndexRef.current = 0;
+    currentChimeRef.current = 1;
+    setCurrentStageIndex(0);
+    setCurrentChime(1);
     pausedElapsedRef.current = 0;
     startTimeRef.current = Date.now();
     phaseRef.current = 'running';
     setPhase('running');
     setIntervalProgress(0);
-    setSecondsToNextChime(intervalMsRef.current / 1000);
-    // Play opening chime
+    setCompletedStageIndex(null);
+    const first = stagesRef.current[0];
+    setSecondsToNextChime(first ? stageIntervalSec(first) : 300);
+    startSilentLoop();
     playChime();
     rafRef.current = setTimeout(tick, 250);
-  }, [tick, playChime]);
+  }, [tick, playChime, startSilentLoop]);
 
   const pause = useCallback(() => {
     if (phaseRef.current !== 'running') return;
@@ -123,27 +181,46 @@ export function useMeditationTimer(
 
   const reset = useCallback(() => {
     stopTick();
+    if (transitionTimerRef.current) {
+      clearTimeout(transitionTimerRef.current);
+      transitionTimerRef.current = null;
+    }
+    stopSilentLoop();
     phaseRef.current = 'idle';
     setPhase('idle');
-    currentIntervalRef.current = 1;
-    setCurrentInterval(1);
+    currentStageIndexRef.current = 0;
+    currentChimeRef.current = 1;
+    setCurrentStageIndex(0);
+    setCurrentChime(1);
     pausedElapsedRef.current = 0;
     setIntervalProgress(0);
-    setSecondsToNextChime(intervalMsRef.current / 1000);
-  }, [stopTick]);
+    setCompletedStageIndex(null);
+    const first = stagesRef.current[0];
+    setSecondsToNextChime(first ? stageIntervalSec(first) : 300);
+  }, [stopTick, stopSilentLoop]);
 
-  // Reset countdown display when settings change while idle
-  useEffect(() => {
-    if (phase === 'idle') {
-      setSecondsToNextChime(intervalMinutes * 60);
-    }
-  }, [intervalMinutes, phase]);
+  useEffect(
+    () => () => {
+      stopTick();
+      if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+      stopSilentLoop();
+    },
+    [stopTick, stopSilentLoop]
+  );
 
-  // Cleanup on unmount
-  useEffect(() => () => stopTick(), [stopTick]);
+  const currentStage = stages[currentStageIndex];
 
   return [
-    { phase, currentInterval, intervalProgress, secondsToNextChime, totalChimes: chimeCount },
+    {
+      phase,
+      currentStageIndex,
+      totalStages: stages.length,
+      currentChime,
+      totalChimesInStage: currentStage?.chimes ?? 1,
+      intervalProgress,
+      secondsToNextChime,
+      completedStageIndex,
+    },
     { begin, pause, resume, reset },
   ];
 }

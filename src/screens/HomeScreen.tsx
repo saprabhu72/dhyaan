@@ -3,42 +3,81 @@ import {
   View,
   Text,
   TouchableOpacity,
+  ScrollView,
   StyleSheet,
   Animated,
   useColorScheme,
   StatusBar,
   Platform,
 } from 'react-native';
-import { StepperControl } from '../components/StepperControl';
+import { StageRow } from '../components/StageRow';
 import { RingTimer } from '../components/RingTimer';
 import { ChimeDots } from '../components/ChimeDots';
+import { UpcomingStages } from '../components/UpcomingStages';
 import { useMeditationTimer } from '../hooks/useMeditationTimer';
-import { useSettings } from '../hooks/useSettings';
+import { useStages } from '../hooks/useStages';
+import { Stage } from '../types';
 import { Colors, Typography, Spacing, Radius } from '../theme';
 
-function formatDuration(minutes: number): string {
-  if (minutes < 60) return `${minutes} min`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
+interface Props {
+  userName: string;
 }
 
-export function HomeScreen() {
+function totalSessionSeconds(stages: Stage[]): number {
+  return stages.reduce(
+    (sum, s) => sum + (s.unit === 'minutes' ? s.interval * 60 : s.interval) * s.chimes,
+    0
+  );
+}
+
+function formatDuration(totalSec: number): string {
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m === 0) return `${s} sec`;
+  if (s === 0) return `${m} min`;
+  return `${m} min ${s} sec`;
+}
+
+function getTimeGreeting(): string {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 12) return 'morning';
+  if (h >= 12 && h < 17) return 'afternoon';
+  if (h >= 17 && h < 22) return 'evening';
+  return 'night';
+}
+
+export function HomeScreen({ userName }: Props) {
   const isDark = useColorScheme() === 'dark';
   const bg = isDark ? Colors.darkBg : Colors.lightBg;
   const surface = isDark ? Colors.darkSurface : Colors.lightSurface;
   const textPrimary = isDark ? Colors.darkText : Colors.amberText;
   const textSub = isDark ? Colors.darkSubtext : Colors.lightSubtext;
 
-  const { settings, updateSettings, saved } = useSettings();
-  const { intervalMinutes, chimeCount } = settings;
-  const totalMinutes = intervalMinutes * chimeCount;
+  const { stages, updateStage, addStage, deleteStage, saved } = useStages();
+  const totalSec = totalSessionSeconds(stages);
 
-  const [timerState, timerControls] = useMeditationTimer(intervalMinutes, chimeCount);
-  const { phase, currentInterval, intervalProgress, secondsToNextChime, totalChimes } = timerState;
+  const [timerState, timerControls] = useMeditationTimer(stages);
+  const {
+    phase,
+    currentStageIndex,
+    totalStages,
+    currentChime,
+    totalChimesInStage,
+    intervalProgress,
+    secondsToNextChime,
+    completedStageIndex,
+  } = timerState;
   const { begin, pause, resume, reset } = timerControls;
 
-  // Saved confirmation fade
+  const isRunning = phase === 'running';
+  const isPaused = phase === 'paused';
+  const isActive = isRunning || isPaused;
+  const isTransitioning = phase === 'transitioning';
+  const isComplete = phase === 'complete';
+  const isIdle = phase === 'idle';
+
+  const upcomingStages = isActive ? stages.slice(currentStageIndex + 1) : [];
+
   const savedOpacity = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     if (saved) {
@@ -50,87 +89,124 @@ export function HomeScreen() {
     }
   }, [saved, savedOpacity]);
 
-  const isRunning = phase === 'running';
-  const isActive = phase === 'running' || phase === 'paused';
-  const isComplete = phase === 'complete';
-  const isIdle = phase === 'idle';
+  const greeting = userName
+    ? `Good ${getTimeGreeting()}, ${userName}`
+    : '';
+
+  const transitionMessage =
+    completedStageIndex !== null
+      ? userName
+        ? `Well done, ${userName}. Stage ${completedStageIndex + 1} complete.`
+        : `Stage ${completedStageIndex + 1} complete.`
+      : '';
+
+  const completeMessage = userName
+    ? `Beautiful practice, ${userName}. ${formatDuration(totalSec)} of stillness.`
+    : `${formatDuration(totalSec)} of stillness.`;
 
   return (
     <View style={[styles.root, { backgroundColor: bg }]}>
-      <StatusBar
-        barStyle={isDark ? 'light-content' : 'dark-content'}
-        backgroundColor={bg}
-      />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={bg} />
 
       {/* Header */}
       <View style={styles.header}>
         <Text style={[styles.headerSmall, { color: textSub }]}>ध्यान</Text>
         <Text style={[styles.headerLarge, { color: textPrimary }]}>Dhyaan</Text>
+        {isIdle && greeting ? (
+          <Text style={[styles.greeting, { color: textSub }]}>{greeting}</Text>
+        ) : null}
       </View>
 
-      {/* Main content area */}
+      {/* Main content */}
       <View style={styles.content}>
 
-        {/* IDLE STATE */}
+        {/* IDLE — stage list */}
         {isIdle && (
-          <View style={styles.idleContainer}>
+          <ScrollView
+            style={styles.scrollView}
+            contentContainerStyle={styles.idleScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
             <Text style={[styles.omSymbol, { color: Colors.amber }]}>ॐ</Text>
 
-            <View style={[styles.stepperRow, { backgroundColor: surface }]}>
-              <StepperControl
-                label="Interval"
-                unit="min"
-                value={intervalMinutes}
-                min={1}
-                max={60}
-                onChange={(v) => updateSettings({ intervalMinutes: v })}
+            {stages.map((stage, index) => (
+              <StageRow
+                key={stage.id}
+                stage={stage}
+                index={index}
+                showDelete={stages.length > 1}
+                onUpdate={(patch) => updateStage(index, patch)}
+                onDelete={() => deleteStage(index)}
               />
-              <View style={[styles.stepperDivider, { backgroundColor: Colors.amberBorder }]} />
-              <StepperControl
-                label="Chimes"
-                unit="times"
-                value={chimeCount}
-                min={1}
-                max={20}
-                onChange={(v) => updateSettings({ chimeCount: v })}
-              />
-            </View>
+            ))}
 
-            <Animated.Text style={[styles.savedText, { color: Colors.amber, opacity: savedOpacity }]}>
+            {stages.length < 6 && (
+              <TouchableOpacity
+                style={styles.addStageBtn}
+                onPress={addStage}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.addStageBtnText, { color: Colors.amber }]}>
+                  + Add Stage
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            <Animated.Text
+              style={[styles.savedText, { color: Colors.amber, opacity: savedOpacity }]}
+            >
               Saved
             </Animated.Text>
 
             <Text style={[styles.durationText, { color: textSub }]}>
-              Total session: {formatDuration(totalMinutes)}
+              Total session: {formatDuration(totalSec)}
             </Text>
-          </View>
+          </ScrollView>
         )}
 
-        {/* RUNNING / PAUSED STATE */}
+        {/* RUNNING / PAUSED */}
         {isActive && (
           <View style={styles.activeContainer}>
+            <Text style={[styles.stageProgress, { color: textSub }]}>
+              Stage {currentStageIndex + 1} of {totalStages}
+            </Text>
+
             <RingTimer
               progress={intervalProgress}
               secondsRemaining={secondsToNextChime}
-              size={220}
+              size={200}
             />
 
             <View style={styles.dotsArea}>
-              <ChimeDots total={totalChimes} current={currentInterval} />
+              <ChimeDots total={totalChimesInStage} current={currentChime} />
             </View>
 
             <Text style={[styles.chimeLabel, { color: textSub }]}>
-              Chime {currentInterval} of {totalChimes}
+              Chime {currentChime} of {totalChimesInStage}
+            </Text>
+
+            <UpcomingStages
+              stages={upcomingStages}
+              startIndex={currentStageIndex + 2}
+            />
+          </View>
+        )}
+
+        {/* TRANSITIONING */}
+        {isTransitioning && (
+          <View style={styles.transitionContainer}>
+            <Text style={[styles.transitionMessage, { color: textPrimary }]}>
+              {transitionMessage}
             </Text>
           </View>
         )}
 
-        {/* COMPLETE STATE */}
+        {/* COMPLETE */}
         {isComplete && (
           <View style={styles.completeContainer}>
             <Text style={[styles.shantiText, { color: Colors.amber }]}>शांति</Text>
             <Text style={[styles.completeSubtitle, { color: textSub }]}>
-              Session complete. Well done, Rupa.
+              {completeMessage}
             </Text>
           </View>
         )}
@@ -160,12 +236,7 @@ export function HomeScreen() {
               onPress={isRunning ? pause : resume}
               activeOpacity={0.8}
             >
-              <Text
-                style={[
-                  styles.primaryButtonText,
-                  { color: isRunning ? Colors.white : Colors.amber },
-                ]}
-              >
+              <Text style={[styles.primaryButtonText, { color: isRunning ? Colors.white : Colors.amber }]}>
                 {isRunning ? 'Pause' : 'Resume'}
               </Text>
             </TouchableOpacity>
@@ -178,6 +249,16 @@ export function HomeScreen() {
               <Text style={[styles.secondaryButtonText, { color: textSub }]}>Reset</Text>
             </TouchableOpacity>
           </View>
+        )}
+
+        {isTransitioning && (
+          <TouchableOpacity
+            style={[styles.secondaryButton, { borderColor: Colors.amberBorder }]}
+            onPress={reset}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.secondaryButtonText, { color: textSub }]}>Reset</Text>
+          </TouchableOpacity>
         )}
 
         {isComplete && (
@@ -217,6 +298,12 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     marginTop: 2,
   },
+  greeting: {
+    fontSize: Typography.small,
+    letterSpacing: 0.5,
+    marginTop: Spacing.xs,
+    fontStyle: 'italic',
+  },
   content: {
     flex: 1,
     alignItems: 'center',
@@ -224,47 +311,56 @@ const styles = StyleSheet.create({
   },
 
   // Idle
-  idleContainer: {
-    alignItems: 'center',
+  scrollView: {
+    flex: 1,
     width: '100%',
-    gap: Spacing.xl,
+  },
+  idleScrollContent: {
+    alignItems: 'center',
+    paddingBottom: Spacing.md,
+    gap: Spacing.md,
   },
   omSymbol: {
-    fontSize: Typography.omSymbol,
+    fontSize: 56,
     fontFamily: 'Georgia',
-    lineHeight: Typography.omSymbol + 12,
+    lineHeight: 68,
+    textAlign: 'center',
+    marginBottom: Spacing.xs,
   },
-  stepperRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: Radius.md,
-    paddingVertical: Spacing.lg,
-    paddingHorizontal: Spacing.md,
-    width: '100%',
+  addStageBtn: {
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.xl,
+    borderRadius: Radius.pill,
+    borderWidth: 1.5,
+    borderColor: Colors.amberBorder,
+    marginTop: Spacing.xs,
   },
-  stepperDivider: {
-    width: 1,
-    height: 48,
-    marginHorizontal: Spacing.md,
-    opacity: 0.4,
+  addStageBtnText: {
+    fontSize: Typography.body,
+    letterSpacing: 0.5,
+    fontWeight: '400',
   },
   savedText: {
     fontSize: Typography.small,
     letterSpacing: 1,
-    marginTop: -Spacing.md,
     height: 18,
   },
   durationText: {
     fontSize: Typography.small,
     letterSpacing: 0.5,
-    marginTop: -Spacing.sm,
+    marginTop: -Spacing.xs,
   },
 
   // Active
   activeContainer: {
     alignItems: 'center',
-    gap: Spacing.xl,
+    gap: Spacing.lg,
     width: '100%',
+  },
+  stageProgress: {
+    fontSize: Typography.small,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
   },
   dotsArea: {
     width: '100%',
@@ -273,6 +369,21 @@ const styles = StyleSheet.create({
     fontSize: Typography.small,
     letterSpacing: 1,
     textTransform: 'uppercase',
+  },
+
+  // Transitioning
+  transitionContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.lg,
+  },
+  transitionMessage: {
+    fontSize: Typography.body,
+    fontFamily: 'Georgia',
+    fontStyle: 'italic',
+    textAlign: 'center',
+    lineHeight: Typography.body * 1.6,
+    letterSpacing: 0.3,
   },
 
   // Complete

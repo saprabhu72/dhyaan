@@ -16,7 +16,6 @@
       "supportsTablet": true,
       "infoPlist": {
         "UIBackgroundModes": [
-          "audio",
           "audio"
         ],
         "ITSAppUsesNonExemptEncryption": false
