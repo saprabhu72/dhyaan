@@ -7,5 +7,5 @@ if [ -z "$IPA" ]; then
   exit 1
 fi
 echo "📦 Submitting $IPA to App Store..."
-eas submit --platform ios --profile production --non-interactive --path "$IPA"
+eas submit --platform ios --profile production --path "$IPA"
 echo "✅ Submission complete!"

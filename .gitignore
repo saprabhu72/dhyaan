@@ -40,3 +40,9 @@ credentials.json
 # generated native folders
 /ios
 /android
+*.ipa
+*.aab
+*.apk
+build-*.ipa
+build-*.aab
+credentials/
