@@ -10,6 +10,7 @@ import {
   StatusBar,
   Platform,
 } from 'react-native';
+import { useKeepAwake } from 'expo-keep-awake';
 import { StageRow } from '../components/StageRow';
 import { RingTimer } from '../components/RingTimer';
 import { ChimeDots } from '../components/ChimeDots';
@@ -71,6 +72,9 @@ export function HomeScreen({ userName }: Props) {
 
   const isRunning = phase === 'running';
   const isPaused = phase === 'paused';
+
+  // Keep screen on while a session is in progress
+  useKeepAwake(isRunning || isPaused || phase === 'transitioning' ? 'dhyaan-session' : undefined);
   const isActive = isRunning || isPaused;
   const isTransitioning = phase === 'transitioning';
   const isComplete = phase === 'complete';
