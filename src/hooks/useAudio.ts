@@ -25,7 +25,9 @@ function float32ToWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   const n = samples.length;
   const buf = new ArrayBuffer(44 + n * 2);
   const v = new DataView(buf);
-  const str = (off: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  const str = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
+  };
   str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE');
   str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
   v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
@@ -46,11 +48,10 @@ function toDataUri(wav: ArrayBuffer): string {
 }
 
 const CHIME_HARMONICS = [
-  { freq: 880, amp: 0.18, decay: 2.5 },
-  { freq: 1760, amp: 0.07, decay: 1.8 },
+  { freq: 880,  amp: 0.18,  decay: 2.5 },
+  { freq: 1760, amp: 0.07,  decay: 1.8 },
   { freq: 2640, amp: 0.025, decay: 1.2 },
 ];
-
 const END_BELL_HARMONICS_1 = [
   { freq: 220, amp: 0.40, decay: 6.5 },
   { freq: 440, amp: 0.20, decay: 5.5 },
@@ -64,8 +65,7 @@ const END_BELL_HARMONICS_2 = [
 ];
 
 function buildEndBell(): Float32Array {
-  const totalDuration = 9;
-  const length = Math.floor(SAMPLE_RATE * totalDuration);
+  const length = Math.floor(SAMPLE_RATE * 9);
   const buf = new Float32Array(length);
   const s1 = buildSineWave(END_BELL_HARMONICS_1, 7.5);
   for (let i = 0; i < s1.length && i < length; i++) buf[i] += s1[i];
@@ -75,11 +75,9 @@ function buildEndBell(): Float32Array {
   return buf;
 }
 
-// 1-second near-silent tone (0.001 amplitude) that loops to hold the AVAudioSession active
 function buildSilentKeepAlive(): Float32Array {
-  const length = SAMPLE_RATE; // 1 second
-  const buf = new Float32Array(length);
-  for (let i = 0; i < length; i++) {
+  const buf = new Float32Array(SAMPLE_RATE);
+  for (let i = 0; i < buf.length; i++) {
     buf[i] = 0.001 * Math.sin(2 * Math.PI * 110 * (i / SAMPLE_RATE));
   }
   return buf;
@@ -96,99 +94,101 @@ const AUDIO_MODE = {
 } as const;
 
 export function useAudio() {
-  const chimeUriRef = useRef<string | null>(null);
-  const endBellUriRef = useRef<string | null>(null);
-  const silentUriRef = useRef<string | null>(null);
+  // Pre-encoded URI strings — built lazily on first use, then cached.
+  // Keeping them separate means one failing can't block the others.
+  const chimeUriRef    = useRef<string | null>(null);
+  const endBellUriRef  = useRef<string | null>(null);
+  const silentUriRef   = useRef<string | null>(null);
   const silentSoundRef = useRef<Audio.Sound | null>(null);
-  // Single Promise that resolves once audio mode is set and buffers are rendered
-  const readyRef = useRef<Promise<void> | null>(null);
 
-  // ─── Eager init at mount ───────────────────────────────────────────────────
+  // Promise for the audio mode call only — fast, no heavy CPU work.
+  const modePromiseRef = useRef<Promise<void> | null>(null);
+
+  // ─── Eager audio mode init at mount ──────────────────────────────────────
   useEffect(() => {
-    readyRef.current = Audio.setAudioModeAsync(AUDIO_MODE).then(() => {
-      chimeUriRef.current = toDataUri(float32ToWav(buildSineWave(CHIME_HARMONICS, 3.5), SAMPLE_RATE));
-      endBellUriRef.current = toDataUri(float32ToWav(buildEndBell(), SAMPLE_RATE));
-      silentUriRef.current = toDataUri(float32ToWav(buildSilentKeepAlive(), SAMPLE_RATE));
-    });
+    modePromiseRef.current = Audio.setAudioModeAsync(AUDIO_MODE);
 
-    // Re-apply audio mode when returning from background or after an interruption
-    // (phone call / Siri resets AVAudioSession; we must re-activate it)
-    const prevState = { value: AppState.currentState };
-    const sub = AppState.addEventListener('change', async (next) => {
-      if (next === 'active') {
+    // Re-apply mode on foreground return; iOS resets AVAudioSession after
+    // interruptions (calls, Siri). Also restart the silent loop if it stopped.
+    const sub = AppState.addEventListener('change', async (state) => {
+      if (state === 'active') {
         await Audio.setAudioModeAsync(AUDIO_MODE).catch(() => {});
-        // If silent loop was loaded but stopped (e.g. interrupted), restart it
         const sound = silentSoundRef.current;
         if (sound) {
           try {
-            const status = await sound.getStatusAsync();
-            if ('isLoaded' in status && status.isLoaded && !status.isPlaying) {
+            const st = await sound.getStatusAsync();
+            if ('isLoaded' in st && st.isLoaded && !st.isPlaying) {
               await sound.playAsync();
             }
           } catch {}
         }
       }
-      prevState.value = next;
     });
 
     return () => sub.remove();
   }, []);
 
-  // Ensures readyRef.current is set (fallback for very early calls before useEffect fires)
-  const ensureReady = useCallback((): Promise<void> => {
-    if (!readyRef.current) {
-      readyRef.current = Audio.setAudioModeAsync(AUDIO_MODE).then(() => {
-        chimeUriRef.current = toDataUri(float32ToWav(buildSineWave(CHIME_HARMONICS, 3.5), SAMPLE_RATE));
-        endBellUriRef.current = toDataUri(float32ToWav(buildEndBell(), SAMPLE_RATE));
-        silentUriRef.current = toDataUri(float32ToWav(buildSilentKeepAlive(), SAMPLE_RATE));
-      });
+  // Waits for audio mode to be ready; starts the call if it hasn't begun yet.
+  const ensureMode = useCallback(async () => {
+    if (!modePromiseRef.current) {
+      modePromiseRef.current = Audio.setAudioModeAsync(AUDIO_MODE);
     }
-    return readyRef.current;
+    await modePromiseRef.current;
   }, []);
 
+  // ─── Playback helpers — buffers built lazily, errors are isolated ─────────
   const playChime = useCallback(async () => {
-    await ensureReady();
-    const uri = chimeUriRef.current;
-    if (!uri) return;
+    await ensureMode();
     try {
-      const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: true, volume: 1.0 });
+      if (!chimeUriRef.current) {
+        chimeUriRef.current = toDataUri(float32ToWav(buildSineWave(CHIME_HARMONICS, 3.5), SAMPLE_RATE));
+      }
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: chimeUriRef.current },
+        { shouldPlay: true, volume: 1.0 }
+      );
       sound.setOnPlaybackStatusUpdate((s) => {
         if ('didJustFinish' in s && s.didJustFinish) sound.unloadAsync();
       });
     } catch (e) {
       console.warn('playChime error', e);
     }
-  }, [ensureReady]);
+  }, [ensureMode]);
 
   const playEndBell = useCallback(async () => {
-    await ensureReady();
-    const uri = endBellUriRef.current;
-    if (!uri) return;
+    await ensureMode();
     try {
-      const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: true, volume: 1.0 });
+      if (!endBellUriRef.current) {
+        endBellUriRef.current = toDataUri(float32ToWav(buildEndBell(), SAMPLE_RATE));
+      }
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: endBellUriRef.current },
+        { shouldPlay: true, volume: 1.0 }
+      );
       sound.setOnPlaybackStatusUpdate((s) => {
         if ('didJustFinish' in s && s.didJustFinish) sound.unloadAsync();
       });
     } catch (e) {
       console.warn('playEndBell error', e);
     }
-  }, [ensureReady]);
+  }, [ensureMode]);
 
   const startSilentLoop = useCallback(async () => {
-    await ensureReady();
+    await ensureMode();
     if (silentSoundRef.current) return;
-    const uri = silentUriRef.current;
-    if (!uri) return;
     try {
+      if (!silentUriRef.current) {
+        silentUriRef.current = toDataUri(float32ToWav(buildSilentKeepAlive(), SAMPLE_RATE));
+      }
       const { sound } = await Audio.Sound.createAsync(
-        { uri },
+        { uri: silentUriRef.current },
         { shouldPlay: true, volume: 1.0, isLooping: true }
       );
       silentSoundRef.current = sound;
     } catch (e) {
       console.warn('startSilentLoop error', e);
     }
-  }, [ensureReady]);
+  }, [ensureMode]);
 
   const stopSilentLoop = useCallback(async () => {
     const sound = silentSoundRef.current;
