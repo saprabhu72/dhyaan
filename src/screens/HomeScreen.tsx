@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   ScrollView,
   StyleSheet,
   Animated,
+  ActivityIndicator,
   useColorScheme,
   StatusBar,
   Platform,
@@ -19,6 +20,8 @@ import { useMeditationTimer } from '../hooks/useMeditationTimer';
 import { useStages } from '../hooks/useStages';
 import { Stage } from '../types';
 import { Colors, Typography, Spacing, Radius } from '../theme';
+import { useSpotify } from '../hooks/useSpotify';
+import { SpotifyPickerModal } from '../components/SpotifyPickerModal';
 
 interface Props {
   userName: string;
@@ -69,6 +72,46 @@ export function HomeScreen({ userName }: Props) {
     completedStageIndex,
   } = timerState;
   const { begin, pause, resume, reset } = timerControls;
+
+  const [spotifyState, spotifyControls] = useSpotify();
+  const [showPicker, setShowPicker] = useState(false);
+
+  // Auto-open the picker after the user successfully connects Spotify
+  const prevAuthRef = useRef(false);
+  useEffect(() => {
+    if (!prevAuthRef.current && spotifyState.isAuthenticated && !spotifyState.selectedPlaylist) {
+      setShowPicker(true);
+    }
+    prevAuthRef.current = spotifyState.isAuthenticated;
+  }, [spotifyState.isAuthenticated]);
+
+  // Pause Spotify when the session completes
+  const prevPhaseRef = useRef(phase);
+  useEffect(() => {
+    if (prevPhaseRef.current !== 'complete' && phase === 'complete' && spotifyState.isAuthenticated) {
+      spotifyControls.pause();
+    }
+    prevPhaseRef.current = phase;
+  }, [phase]);
+
+  const handleBegin = () => {
+    begin();
+    if (spotifyState.isAuthenticated && spotifyState.selectedPlaylist) {
+      spotifyControls.play(true);
+    }
+  };
+  const handlePause = () => {
+    pause();
+    if (spotifyState.isAuthenticated) spotifyControls.pause();
+  };
+  const handleResume = () => {
+    resume();
+    if (spotifyState.isAuthenticated) spotifyControls.play(false);
+  };
+  const handleReset = () => {
+    reset();
+    if (spotifyState.isAuthenticated) spotifyControls.pause();
+  };
 
   const isRunning = phase === 'running';
   const isPaused = phase === 'paused';
@@ -162,6 +205,50 @@ export function HomeScreen({ userName }: Props) {
               Saved
             </Animated.Text>
 
+            {/* Spotify music */}
+            <View style={styles.musicSection}>
+              {!spotifyState.isAuthenticated ? (
+                <TouchableOpacity
+                  style={styles.musicBtn}
+                  onPress={spotifyControls.authenticate}
+                  activeOpacity={0.7}
+                >
+                  {spotifyState.isLoading ? (
+                    <ActivityIndicator size="small" color={Colors.amber} />
+                  ) : (
+                    <Text style={[styles.musicBtnText, { color: Colors.amber }]}>♫  Add music</Text>
+                  )}
+                </TouchableOpacity>
+              ) : !spotifyState.selectedPlaylist ? (
+                <TouchableOpacity
+                  style={styles.musicBtn}
+                  onPress={() => setShowPicker(true)}
+                  activeOpacity={0.7}
+                >
+                  {spotifyState.isLoading ? (
+                    <ActivityIndicator size="small" color={Colors.amber} />
+                  ) : (
+                    <Text style={[styles.musicBtnText, { color: Colors.amber }]}>♫  Choose playlist</Text>
+                  )}
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.musicSelected}>
+                  <Text style={[styles.musicName, { color: textPrimary }]} numberOfLines={1}>
+                    ♫  {spotifyState.selectedPlaylist.name}
+                  </Text>
+                  <View style={styles.musicLinks}>
+                    <TouchableOpacity onPress={spotifyControls.openInSpotify} activeOpacity={0.7}>
+                      <Text style={[styles.musicLink, { color: Colors.amber }]}>Open in Spotify</Text>
+                    </TouchableOpacity>
+                    <Text style={[styles.musicLinkSep, { color: textSub }]}> · </Text>
+                    <TouchableOpacity onPress={() => setShowPicker(true)} activeOpacity={0.7}>
+                      <Text style={[styles.musicLink, { color: textSub }]}>Change</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </View>
+
             <Text style={[styles.durationText, { color: textSub }]}>
               Total session: {formatDuration(totalSec)}
             </Text>
@@ -216,12 +303,19 @@ export function HomeScreen({ userName }: Props) {
         )}
       </View>
 
+      <SpotifyPickerModal
+        visible={showPicker}
+        spotifyState={spotifyState}
+        spotifyControls={spotifyControls}
+        onClose={() => setShowPicker(false)}
+      />
+
       {/* Buttons */}
       <View style={styles.buttonArea}>
         {isIdle && (
           <TouchableOpacity
             style={[styles.primaryButton, { backgroundColor: Colors.amber, borderColor: Colors.amber }]}
-            onPress={begin}
+            onPress={handleBegin}
             activeOpacity={0.8}
           >
             <Text style={[styles.primaryButtonText, { color: Colors.white }]}>Begin</Text>
@@ -237,7 +331,7 @@ export function HomeScreen({ userName }: Props) {
                   ? { backgroundColor: Colors.amber, borderColor: Colors.amber }
                   : { backgroundColor: 'transparent', borderColor: Colors.amber },
               ]}
-              onPress={isRunning ? pause : resume}
+              onPress={isRunning ? handlePause : handleResume}
               activeOpacity={0.8}
             >
               <Text style={[styles.primaryButtonText, { color: isRunning ? Colors.white : Colors.amber }]}>
@@ -247,7 +341,7 @@ export function HomeScreen({ userName }: Props) {
 
             <TouchableOpacity
               style={[styles.secondaryButton, { borderColor: Colors.amberBorder }]}
-              onPress={reset}
+              onPress={handleReset}
               activeOpacity={0.7}
             >
               <Text style={[styles.secondaryButtonText, { color: textSub }]}>Reset</Text>
@@ -258,7 +352,7 @@ export function HomeScreen({ userName }: Props) {
         {isTransitioning && (
           <TouchableOpacity
             style={[styles.secondaryButton, { borderColor: Colors.amberBorder }]}
-            onPress={reset}
+            onPress={handleReset}
             activeOpacity={0.7}
           >
             <Text style={[styles.secondaryButtonText, { color: textSub }]}>Reset</Text>
@@ -268,7 +362,7 @@ export function HomeScreen({ userName }: Props) {
         {isComplete && (
           <TouchableOpacity
             style={[styles.primaryButton, { backgroundColor: 'transparent', borderColor: Colors.amber }]}
-            onPress={reset}
+            onPress={handleReset}
             activeOpacity={0.8}
           >
             <Text style={[styles.primaryButtonText, { color: Colors.amber }]}>Reset</Text>
@@ -442,5 +536,46 @@ const styles = StyleSheet.create({
     fontSize: Typography.button,
     fontWeight: '400',
     letterSpacing: 0.5,
+  },
+
+  // Spotify music section
+  musicSection: {
+    alignItems: 'center',
+    marginTop: Spacing.xs,
+  },
+  musicBtn: {
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    borderColor: Colors.amberBorder,
+    minWidth: 160,
+    alignItems: 'center',
+  },
+  musicBtnText: {
+    fontSize: Typography.small,
+    letterSpacing: 0.5,
+  },
+  musicSelected: {
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  musicName: {
+    fontSize: Typography.small,
+    letterSpacing: 0.5,
+    fontStyle: 'italic',
+    maxWidth: 260,
+    textAlign: 'center',
+  },
+  musicLinks: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  musicLink: {
+    fontSize: Typography.small,
+    letterSpacing: 0.3,
+  },
+  musicLinkSep: {
+    fontSize: Typography.small,
   },
 });

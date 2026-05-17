@@ -2,6 +2,7 @@
   "expo": {
     "name": "Dhyaan",
     "slug": "dhyaan",
+    "scheme": "dhyaan",
     "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./dhyaan_ios_icon.png",
@@ -40,7 +41,8 @@
         {
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {
